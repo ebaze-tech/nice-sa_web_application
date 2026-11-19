@@ -87,17 +87,6 @@ Validation failures use the same envelope with field-level entries in `error.fie
 
 Development uses Django's console email backend. Any other `DJANGO_ENV` uses SMTP from environment variables. Verification links expire after 24 hours; password-reset links expire after 60 minutes. Issuing a new link invalidates the previous unused link, and successful password reset invalidates all sessions.
 
-## Reverse proxy
-
-Django trusts `X-Forwarded-Proto: https`, uses `STATIC_ROOT=server/staticfiles`, and derives client IPs from `X-Forwarded-For` using `TRUSTED_PROXY_COUNT`. nginx must replace or safely append forwarding headers and the configured proxy count must match the trusted topology; never accept spoofable forwarding headers directly from the public internet.
-
-Production example:
-
-```sh
-gunicorn config.wsgi:application --bind 127.0.0.1:8000
-```
-
-Enable HTTPS redirect and HSTS only after nginx HTTPS and forwarded-protocol handling are verified.
 
 ## Tests
 
