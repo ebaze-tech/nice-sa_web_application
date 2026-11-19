@@ -1,31 +1,15 @@
-import os
-from datetime import timedelta
-from pathlib import Path    
-
-import dj_database_url
-from django.core.exceptions import ImproperlyConfigured
-from dotenv import load_dotenv
+from pathlib import Path
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 load_dotenv(BASE_DIR / ".env")
 
 
-def env_bool(name: str, default: bool = False) -> bool:
-    return os.getenv(name, str(default)).strip().lower() in {"1", "true", "yes", "on"}
+SECRET_KEY = "django-insecure-#v03qk@prgdfct#87ek3o(uk3^p3j_a_y20oi#19wpsi3puj&6"
 
+DEBUG = True
 
-def env_list(name: str, default: str = "") -> list[str]:
-    return [item.strip() for item in os.getenv(name, default).split(",") if item.strip()]
+ALLOWED_HOSTS = []
 
-
-SECRET_KEY = os.getenv("DJANGO_SECRET_KEY") or os.getenv("SECRET_KEY") or "unsafe-development-key-change-me"
-DEBUG = env_bool("DJANGO_DEBUG", env_bool("DEBUG", True))
-ALLOWED_HOSTS = env_list(
-    "DJANGO_ALLOWED_HOSTS",
-    os.getenv("ALLOWED_HOSTS", "localhost,127.0.0.1,testserver"),
-)
-if not DEBUG and (SECRET_KEY == "unsafe-development-key-change-me" or len(SECRET_KEY) < 32):
-    raise ImproperlyConfigured("DJANGO_SECRET_KEY must be set to at least 32 characters outside development.")
 
 INSTALLED_APPS = [
     "django.contrib.admin",
@@ -34,17 +18,19 @@ INSTALLED_APPS = [
     "django.contrib.sessions",
     "django.contrib.messages",
     "django.contrib.staticfiles",
-    "corsheaders",
-    "rest_framework",
-    "rest_framework_simplejwt.token_blacklist",
-    "drf_spectacular",
     "accounts",
+    "announcements",
     "audit",
+    "events",
+    "levies",
+    "notifications",
+    "payments",
+    "reports",
+    "students"
 ]
 
 MIDDLEWARE = [
     "django.middleware.security.SecurityMiddleware",
-    "corsheaders.middleware.CorsMiddleware",
     "django.contrib.sessions.middleware.SessionMiddleware",
     "django.middleware.common.CommonMiddleware",
     "django.middleware.csrf.CsrfViewMiddleware",
@@ -68,28 +54,37 @@ TEMPLATES = [
         },
     },
 ]
+
 WSGI_APPLICATION = "config.wsgi.application"
-ASGI_APPLICATION = "config.asgi.application"
 
 DATABASES = {
-    "default": dj_database_url.config(
-        default=f"sqlite:///{BASE_DIR / 'db.sqlite3'}",
-        conn_max_age=int(os.getenv("DB_CONN_MAX_AGE", "60")),
-        conn_health_checks=True,
-    )
+    "default": {
+        "ENGINE": "django.db.backends.sqlite3",
+        "NAME": BASE_DIR / "db.sqlite3",
+    }
 }
 
-AUTH_USER_MODEL = "accounts.User"
-AUTHENTICATION_BACKENDS = ["accounts.backends.IdentifierBackend"]
+
 AUTH_PASSWORD_VALIDATORS = [
-    {"NAME": "django.contrib.auth.password_validation.UserAttributeSimilarityValidator"},
-    {"NAME": "django.contrib.auth.password_validation.MinimumLengthValidator"},
-    {"NAME": "django.contrib.auth.password_validation.CommonPasswordValidator"},
-    {"NAME": "django.contrib.auth.password_validation.NumericPasswordValidator"},
+    {
+        "NAME": "django.contrib.auth.password_validation.UserAttributeSimilarityValidator",
+    },
+    {
+        "NAME": "django.contrib.auth.password_validation.MinimumLengthValidator",
+    },
+    {
+        "NAME": "django.contrib.auth.password_validation.CommonPasswordValidator",
+    },
+    {
+        "NAME": "django.contrib.auth.password_validation.NumericPasswordValidator",
+    },
 ]
 
+
 LANGUAGE_CODE = "en-us"
-TIME_ZONE = os.getenv("DJANGO_TIME_ZONE", "Africa/Lagos")
+
+TIME_ZONE = "UTC"
+
 USE_I18N = True
 USE_TZ = True
 STATIC_URL = "/static/"
@@ -100,32 +95,12 @@ SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
 USE_X_FORWARDED_HOST = env_bool("USE_X_FORWARDED_HOST", True)
 TRUSTED_PROXY_COUNT = int(os.getenv("TRUSTED_PROXY_COUNT", "1"))
 
-CORS_ALLOWED_ORIGINS = env_list("CORS_ALLOWED_ORIGINS", "http://localhost:3000")
-CORS_ALLOW_CREDENTIALS = True
-CSRF_TRUSTED_ORIGINS = env_list("CSRF_TRUSTED_ORIGINS", "http://localhost:3000")
-CSRF_COOKIE_SECURE = env_bool("CSRF_COOKIE_SECURE", not DEBUG)
-CSRF_COOKIE_SAMESITE = os.getenv("CSRF_COOKIE_SAMESITE", "Lax")
-CSRF_COOKIE_HTTPONLY = False
-CSRF_FAILURE_VIEW = "accounts.exceptions.csrf_failure"
-SESSION_COOKIE_SECURE = env_bool("SESSION_COOKIE_SECURE", not DEBUG)
+STATIC_URL = "static/"
 
-REFRESH_COOKIE_NAME = os.getenv("REFRESH_COOKIE_NAME", "nicesa_refresh")
-REFRESH_COOKIE_SECURE = env_bool("REFRESH_COOKIE_SECURE", not DEBUG)
-REFRESH_COOKIE_SAMESITE = os.getenv("REFRESH_COOKIE_SAMESITE", "Lax")
-REFRESH_COOKIE_DOMAIN = os.getenv("REFRESH_COOKIE_DOMAIN") or None
-REFRESH_COOKIE_PATH = os.getenv("REFRESH_COOKIE_PATH", "/api/v1/auth/")
 
-REST_FRAMEWORK = {
-    "DEFAULT_AUTHENTICATION_CLASSES": ["accounts.authentication.SessionBoundJWTAuthentication"],
-    "DEFAULT_PERMISSION_CLASSES": ["rest_framework.permissions.IsAuthenticated"],
-    "DEFAULT_SCHEMA_CLASS": "drf_spectacular.openapi.AutoSchema",
-    "EXCEPTION_HANDLER": "accounts.exceptions.api_exception_handler",
-    "NUM_PROXIES": TRUSTED_PROXY_COUNT,
-    "DEFAULT_THROTTLE_RATES": {
-        "login": os.getenv("LOGIN_THROTTLE_RATE", "10/minute"),
-        "registration": os.getenv("REGISTRATION_THROTTLE_RATE", "5/hour"),
-        "resend_verification": os.getenv("RESEND_VERIFICATION_THROTTLE_RATE", "5/hour"),
-        "password_reset": os.getenv("PASSWORD_RESET_THROTTLE_RATE", "5/hour"),
+MAILERS = {
+    "default": {
+        "BACKEND": "django.core.mail.backends.console.EmailBackend",
     },
 }
 
