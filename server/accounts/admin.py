@@ -1,11 +1,20 @@
 from django.contrib import admin
 from django.contrib.auth.admin import UserAdmin
 
+from .forms import (
+    NicesaAdminPasswordChangeForm,
+    NicesaUserChangeForm,
+    NicesaUserCreationForm,
+)
 from .models import AuthSession, LoginAttempt, OneTimeToken, User
+from .services import revoke_all_sessions
 
 
 @admin.register(User)
 class NicesaUserAdmin(UserAdmin):
+    add_form = NicesaUserCreationForm
+    form = NicesaUserChangeForm
+    change_password_form = NicesaAdminPasswordChangeForm
     ordering = ("email",)
     list_display = ("email", "matric_number", "role", "is_active", "is_staff")
     list_filter = ("role", "is_active", "is_staff", "level")
@@ -18,8 +27,31 @@ class NicesaUserAdmin(UserAdmin):
         ("Important dates", {"fields": ("last_login", "date_joined")}),
     )
     add_fieldsets = (
-        (None, {"classes": ("wide",), "fields": ("email", "password1", "password2", "is_active")}),
+        (
+            None,
+            {
+                "classes": ("wide",),
+                "fields": (
+                    "email",
+                    "password1",
+                    "password2",
+                    "first_name",
+                    "last_name",
+                    "matric_number",
+                    "level",
+                    "is_active",
+                ),
+            },
+        ),
     )
+
+    def save_model(self, request, obj, form, change):
+        was_active = None
+        if change:
+            was_active = User.objects.only("is_active").get(pk=obj.pk).is_active
+        super().save_model(request, obj, form, change)
+        if was_active and not obj.is_active:
+            revoke_all_sessions(obj, "admin_deactivated")
 
 
 @admin.register(AuthSession)

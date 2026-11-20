@@ -37,3 +37,17 @@ def send_password_reset_email(user, raw_token):
         [user.email],
         fail_silently=False,
     )
+
+
+def send_password_changed_email(user):
+    send_mail(
+        "Your NICESA password was changed",
+        (
+            f"Hello {user.first_name or 'there'},\n\n"
+            "Your NICESA account password was changed successfully.\n\n"
+            "If you did not make this change, contact the department administrator immediately."
+        ),
+        settings.DEFAULT_FROM_EMAIL,
+        [user.email],
+        fail_silently=False,
+    )

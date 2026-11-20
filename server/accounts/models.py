@@ -16,6 +16,8 @@ from .utils import normalize_email, normalize_matric_number, token_digest
 
 def validate_matric_number(value):
     normalized = normalize_matric_number(value)
+    if normalized and len(normalized) > 64:
+        raise ValidationError("Matric number must be no longer than 64 characters after normalization.")
     if normalized and "@" in normalized:
         raise ValidationError("Matric number cannot contain '@'.")
     if normalized and any(not char.isprintable() for char in normalized):
@@ -59,6 +61,10 @@ class User(AbstractUser):
                 condition=Q(matric_number__isnull=False),
                 name="accounts_user_matric_ci_unique",
             ),
+            models.CheckConstraint(
+                condition=~Q(role="admin") | Q(is_superuser=True),
+                name="accounts_admin_role_requires_superuser",
+            ),
         ]
         permissions = [(item.codename, item.name) for item in OFFICER_PERMISSIONS]
 
@@ -66,6 +72,9 @@ class User(AbstractUser):
         super().clean()
         self.email = normalize_email(self.email)
         self.matric_number = normalize_matric_number(self.matric_number)
+        validate_matric_number(self.matric_number)
+        if self.role == self.Role.ADMIN and not self.is_superuser:
+            raise ValidationError({"role": "The admin role requires superuser status."})
 
     def save(self, *args, **kwargs):
         self.email = normalize_email(self.email)

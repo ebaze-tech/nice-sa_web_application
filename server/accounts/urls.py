@@ -2,6 +2,7 @@ from django.urls import path
 
 from .views import (
     AvailablePermissionsView,
+    ChangePasswordView,
     CsrfView,
     DemoteOfficerView,
     EditOfficerPermissionsView,
@@ -32,6 +33,7 @@ urlpatterns = [
     path("logout-all/", LogoutAllView.as_view(), name="logout-all"),
     path("password-reset/", PasswordResetRequestView.as_view(), name="password-reset"),
     path("password-reset/confirm/", PasswordResetConfirmView.as_view(), name="password-reset-confirm"),
+    path("change-password/", ChangePasswordView.as_view(), name="change-password"),
     path("csrf/", CsrfView.as_view(), name="csrf"),
     path("me/", MeView.as_view(), name="me"),
     path("sessions/", SessionListView.as_view(), name="sessions"),

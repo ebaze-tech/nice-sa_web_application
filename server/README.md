@@ -6,10 +6,63 @@ This directory contains the Django/DRF backend. The current scope is authenticat
 
 1. Create and activate a virtual environment.
 2. Install dependencies with `pip install -r requirements.txt`.
-3. Copy `.env.example` to `.env` and set a local `DATABASE_URL` and `DJANGO_SECRET_KEY`.
+3. Create `.env` in this directory using the environment-variable table below.
 4. Run `python manage.py migrate` against your local database.
 5. Create the first administrator with `python manage.py createsuperuser`.
 6. Run `python manage.py runserver`.
+
+## Environment variables
+
+`DJANGO_ENV=development` enables the documented local defaults. In every other environment, startup fails unless the five production-required values below are present; there are no SQLite or localhost fallbacks.
+
+| Variable | Default | Required in production |
+| --- | --- | --- |
+| `DJANGO_ENV` | `development` | No |
+| `DJANGO_SECRET_KEY` | Unsafe development-only key | Yes; minimum 32 characters |
+| `DJANGO_DEBUG` | `True` in development; `False` otherwise | No |
+| `DJANGO_ALLOWED_HOSTS` | `localhost,127.0.0.1,testserver` in development | Yes |
+| `DATABASE_URL` | `sqlite:///server/db.sqlite3` in development | Yes |
+| `DB_CONN_MAX_AGE` | `60` seconds | No |
+| `DJANGO_TIME_ZONE` | `Africa/Lagos` | No |
+| `USE_X_FORWARDED_HOST` | `True` | No |
+| `TRUSTED_PROXY_COUNT` | `1` | No |
+| `CORS_ALLOWED_ORIGINS` | `http://localhost:3000` in development; empty otherwise | No |
+| `CSRF_TRUSTED_ORIGINS` | `http://localhost:3000` in development; empty otherwise | No |
+| `CSRF_COOKIE_SECURE` | Opposite of `DEBUG` | No |
+| `CSRF_COOKIE_SAMESITE` | `Lax` | No |
+| `SESSION_COOKIE_SECURE` | Opposite of `DEBUG` | No |
+| `REFRESH_COOKIE_NAME` | `nicesa_refresh` | No |
+| `REFRESH_COOKIE_SECURE` | Opposite of `DEBUG` | No |
+| `REFRESH_COOKIE_SAMESITE` | `Lax` | No |
+| `REFRESH_COOKIE_DOMAIN` | Unset | No |
+| `REFRESH_COOKIE_PATH` | `/api/v1/auth/` | No |
+| `LOGIN_THROTTLE_RATE` | `10/minute` | No |
+| `REGISTRATION_THROTTLE_RATE` | `5/hour` | No |
+| `RESEND_VERIFICATION_THROTTLE_RATE` | `5/hour` | No |
+| `PASSWORD_RESET_THROTTLE_RATE` | `5/hour` | No |
+| `CHANGE_PASSWORD_THROTTLE_RATE` | `10/hour` | No |
+| `JWT_ACCESS_MINUTES` | `5` | No |
+| `JWT_REFRESH_DAYS` | `7` | No |
+| `EMAIL_HOST` | Empty | No |
+| `EMAIL_PORT` | `587` | No |
+| `EMAIL_HOST_USER` | Empty | No |
+| `EMAIL_HOST_PASSWORD` | Empty | No |
+| `EMAIL_USE_TLS` | `True` | No |
+| `EMAIL_USE_SSL` | `False` | No |
+| `EMAIL_TIMEOUT` | `10` seconds | No |
+| `DEFAULT_FROM_EMAIL` | `NICESA <no-reply@example.com>` | No |
+| `FRONTEND_VERIFY_URL` | `http://localhost:3000/verify-email` in development | Yes |
+| `FRONTEND_PASSWORD_RESET_URL` | `http://localhost:3000/reset-password` in development | Yes |
+| `EMAIL_VERIFICATION_HOURS` | `24` | No |
+| `PASSWORD_RESET_MINUTES` | `60` | No |
+| `LOGIN_MAX_FAILURES` | `5` | No |
+| `LOGIN_LOCKOUT_MINUTES` | `15` | No |
+| `SECURE_SSL_REDIRECT` | `False` | No |
+| `SECURE_HSTS_SECONDS` | `0` | No |
+| `SECURE_HSTS_INCLUDE_SUBDOMAINS` | `False` | No |
+| `SECURE_HSTS_PRELOAD` | `False` | No |
+
+Development uses the console email backend. Other environments use SMTP and should configure the relevant `EMAIL_*` values for their provider.
 
 The auth dependencies are:
 
@@ -49,6 +102,7 @@ All endpoints are under `/api/v1/auth/`.
 | POST | `logout-all/` | Revoke every session for the authenticated user. |
 | POST | `password-reset/` | Generically request a reset link by email. |
 | POST | `password-reset/confirm/` | Consume a token, set a password, and revoke all sessions. |
+| POST | `change-password/` | Change the authenticated user's password, retain the current session, and revoke all others. |
 | GET | `me/` | Return the authenticated user and current database permissions. |
 | GET | `sessions/` | List the user's active and revoked login sessions. |
 | POST | `sessions/{uuid}/revoke/` | Revoke one of the user's sessions. |
@@ -80,7 +134,7 @@ All passwords — registration, password-reset, and admin-created users — are 
 | Not on common-password list | Django's built-in list of ~20 000 common passwords |
 | Not entirely numeric | Must contain at least one non-digit character |
 
-Validation errors are returned field-level under `error.fields.password` (registration) or `error.fields.new_password` (password reset) in the standard error envelope.
+Validation errors are returned field-level under `error.fields.password` (registration) or `error.fields.new_password` (password reset and authenticated password change) in the standard error envelope.
 
 
 ## Roles and permissions
@@ -105,7 +159,7 @@ Validation failures use the same envelope with field-level entries in `error.fie
 
 ## Email and expiry
 
-Development uses Django's console email backend. Any other `DJANGO_ENV` uses SMTP from environment variables. Verification links expire after 24 hours; password-reset links expire after 60 minutes. Issuing a new link invalidates the previous unused link, and successful password reset invalidates all sessions.
+Development uses Django's console email backend. Any other `DJANGO_ENV` uses SMTP from environment variables. Verification links expire after 24 hours; password-reset links expire after 60 minutes. Issuing a new link invalidates the previous unused link, and successful password reset invalidates all sessions. Verification, reset, and password-change emails are sent only after the surrounding database transaction commits.
 
 
 ## Tests

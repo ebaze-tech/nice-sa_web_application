@@ -10,7 +10,7 @@ from .utils import normalize_email, normalize_matric_number
 class RegistrationSerializer(serializers.ModelSerializer):
     first_name = serializers.CharField(max_length=150, allow_blank=False)
     last_name = serializers.CharField(max_length=150, allow_blank=False)
-    matric_number = serializers.CharField(max_length=64, allow_blank=False)
+    matric_number = serializers.CharField(allow_blank=False)
     password = serializers.CharField(write_only=True, trim_whitespace=False, max_length=128)
 
     class Meta:
@@ -33,7 +33,7 @@ class RegistrationSerializer(serializers.ModelSerializer):
             validate_matric_number(value)
         except Exception as exc:
             raise serializers.ValidationError(exc.messages if hasattr(exc, "messages") else str(exc))
-        if User.objects.filter(matric_number=value).exists():
+        if User.objects.filter(matric_number__iexact=value).exists():
             raise serializers.ValidationError("An account with this matric number already exists.")
         return value
 
@@ -95,6 +95,26 @@ class PasswordResetConfirmSerializer(TokenSerializer):
             raise serializers.ValidationError(
                 getattr(exc, "messages", [str(exc)])
             ) from exc
+        return value
+
+
+class ChangePasswordSerializer(serializers.Serializer):
+    current_password = serializers.CharField(write_only=True, trim_whitespace=False, max_length=128)
+    new_password = serializers.CharField(write_only=True, trim_whitespace=False, max_length=128)
+
+    def validate_current_password(self, value):
+        if not self.context["user"].check_password(value):
+            raise serializers.ValidationError("Current password is incorrect.")
+        return value
+
+    def validate_new_password(self, value):
+        user = self.context["user"]
+        if user.check_password(value):
+            raise serializers.ValidationError("New password must differ from the current password.")
+        try:
+            password_validation.validate_password(value, user=user)
+        except Exception as exc:
+            raise serializers.ValidationError(getattr(exc, "messages", [str(exc)])) from exc
         return value
 
 

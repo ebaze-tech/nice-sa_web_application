@@ -18,14 +18,39 @@ def env_list(name: str, default: str = "") -> list[str]:
     return [item.strip() for item in os.getenv(name, default).split(",") if item.strip()]
 
 
-SECRET_KEY = os.getenv("DJANGO_SECRET_KEY") or os.getenv("SECRET_KEY") or "unsafe-development-key-change-me"
-DEBUG = env_bool("DJANGO_DEBUG", env_bool("DEBUG", True))
-ALLOWED_HOSTS = env_list(
-    "DJANGO_ALLOWED_HOSTS",
-    os.getenv("ALLOWED_HOSTS", "localhost,127.0.0.1,testserver"),
-)
-if not DEBUG and (SECRET_KEY == "unsafe-development-key-change-me" or len(SECRET_KEY) < 32):
-    raise ImproperlyConfigured("DJANGO_SECRET_KEY must be set to at least 32 characters outside development.")
+DJANGO_ENV = os.getenv("DJANGO_ENV", "development").strip().lower()
+IS_DEVELOPMENT = DJANGO_ENV == "development"
+
+
+def required_env(name: str) -> str:
+    value = os.getenv(name, "").strip()
+    if not value:
+        raise ImproperlyConfigured(f"{name} must be set outside development.")
+    return value
+
+
+if IS_DEVELOPMENT:
+    SECRET_KEY = os.getenv("DJANGO_SECRET_KEY", "unsafe-development-key-change-me")
+    DEBUG = env_bool("DJANGO_DEBUG", True)
+    ALLOWED_HOSTS = env_list("DJANGO_ALLOWED_HOSTS", "localhost,127.0.0.1,testserver")
+    DATABASE_URL = os.getenv("DATABASE_URL", f"sqlite:///{BASE_DIR / 'db.sqlite3'}")
+    FRONTEND_VERIFY_URL = os.getenv("FRONTEND_VERIFY_URL", "http://localhost:3000/verify-email")
+    FRONTEND_PASSWORD_RESET_URL = os.getenv(
+        "FRONTEND_PASSWORD_RESET_URL", "http://localhost:3000/reset-password"
+    )
+else:
+    SECRET_KEY = required_env("DJANGO_SECRET_KEY")
+    if len(SECRET_KEY) < 32:
+        raise ImproperlyConfigured(
+            "DJANGO_SECRET_KEY must be at least 32 characters outside development."
+        )
+    DEBUG = env_bool("DJANGO_DEBUG", False)
+    ALLOWED_HOSTS = env_list("DJANGO_ALLOWED_HOSTS")
+    if not ALLOWED_HOSTS:
+        raise ImproperlyConfigured("DJANGO_ALLOWED_HOSTS must be set outside development.")
+    DATABASE_URL = required_env("DATABASE_URL")
+    FRONTEND_VERIFY_URL = required_env("FRONTEND_VERIFY_URL")
+    FRONTEND_PASSWORD_RESET_URL = required_env("FRONTEND_PASSWORD_RESET_URL")
 
 INSTALLED_APPS = [
     "django.contrib.admin",
@@ -73,7 +98,7 @@ ASGI_APPLICATION = "config.asgi.application"
 
 DATABASES = {
     "default": dj_database_url.config(
-        default=f"sqlite:///{BASE_DIR / 'db.sqlite3'}",
+        default=DATABASE_URL,
         conn_max_age=int(os.getenv("DB_CONN_MAX_AGE", "60")),
         conn_health_checks=True,
     )
@@ -100,9 +125,13 @@ SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
 USE_X_FORWARDED_HOST = env_bool("USE_X_FORWARDED_HOST", True)
 TRUSTED_PROXY_COUNT = int(os.getenv("TRUSTED_PROXY_COUNT", "1"))
 
-CORS_ALLOWED_ORIGINS = env_list("CORS_ALLOWED_ORIGINS", "http://localhost:3000")
+CORS_ALLOWED_ORIGINS = env_list(
+    "CORS_ALLOWED_ORIGINS", "http://localhost:3000" if IS_DEVELOPMENT else ""
+)
 CORS_ALLOW_CREDENTIALS = True
-CSRF_TRUSTED_ORIGINS = env_list("CSRF_TRUSTED_ORIGINS", "http://localhost:3000")
+CSRF_TRUSTED_ORIGINS = env_list(
+    "CSRF_TRUSTED_ORIGINS", "http://localhost:3000" if IS_DEVELOPMENT else ""
+)
 CSRF_COOKIE_SECURE = env_bool("CSRF_COOKIE_SECURE", not DEBUG)
 CSRF_COOKIE_SAMESITE = os.getenv("CSRF_COOKIE_SAMESITE", "Lax")
 CSRF_COOKIE_HTTPONLY = False
@@ -126,6 +155,7 @@ REST_FRAMEWORK = {
         "registration": os.getenv("REGISTRATION_THROTTLE_RATE", "5/hour"),
         "resend_verification": os.getenv("RESEND_VERIFICATION_THROTTLE_RATE", "5/hour"),
         "password_reset": os.getenv("PASSWORD_RESET_THROTTLE_RATE", "5/hour"),
+        "change_password": os.getenv("CHANGE_PASSWORD_THROTTLE_RATE", "10/hour"),
     },
 }
 
@@ -145,8 +175,7 @@ SPECTACULAR_SETTINGS = {
     "SERVE_INCLUDE_SCHEMA": False,
 }
 
-DJANGO_ENV = os.getenv("DJANGO_ENV", "development").lower()
-if DJANGO_ENV == "development":
+if IS_DEVELOPMENT:
     EMAIL_BACKEND = "django.core.mail.backends.console.EmailBackend"
 else:
     EMAIL_BACKEND = "django.core.mail.backends.smtp.EmailBackend"
@@ -159,10 +188,6 @@ else:
     EMAIL_TIMEOUT = int(os.getenv("EMAIL_TIMEOUT", "10"))
 
 DEFAULT_FROM_EMAIL = os.getenv("DEFAULT_FROM_EMAIL", "NICESA <no-reply@example.com>")
-FRONTEND_VERIFY_URL = os.getenv("FRONTEND_VERIFY_URL", "http://localhost:3000/verify-email")
-FRONTEND_PASSWORD_RESET_URL = os.getenv(
-    "FRONTEND_PASSWORD_RESET_URL", "http://localhost:3000/reset-password"
-)
 EMAIL_VERIFICATION_HOURS = int(os.getenv("EMAIL_VERIFICATION_HOURS", "24"))
 PASSWORD_RESET_MINUTES = int(os.getenv("PASSWORD_RESET_MINUTES", "60"))
 LOGIN_MAX_FAILURES = int(os.getenv("LOGIN_MAX_FAILURES", "5"))

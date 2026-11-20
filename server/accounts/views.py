@@ -5,7 +5,7 @@ from django.contrib.auth import authenticate, get_user_model
 from django.contrib.auth.models import Permission
 from django.contrib.auth.password_validation import validate_password
 from django.core.exceptions import ValidationError as DjangoValidationError
-from django.db import transaction
+from django.db import IntegrityError, transaction
 from django.middleware.csrf import get_token
 from django.utils import timezone
 from django.utils.decorators import method_decorator
@@ -23,12 +23,13 @@ from audit.services import record_event
 
 from .constants import OFFICER_PERMISSION_CODENAMES, OFFICER_PERMISSIONS
 from .cookies import clear_refresh_cookie, set_refresh_cookie
-from .emails import send_password_reset_email, send_verification_email
+from .emails import send_password_changed_email, send_password_reset_email, send_verification_email
 from .exceptions import GenericLoginError, InvalidRefreshSession, MissingRefreshSession
 from .models import AuthSession, OneTimeToken, User
 from .permissions import IsAdminRole
 from .serializers import (
     AuthSessionSerializer,
+    ChangePasswordSerializer,
     CsrfResponseSerializer,
     EmailSerializer,
     LoginResponseSerializer,
@@ -49,11 +50,13 @@ from .services import (
     issue_session_tokens,
     record_login_failure,
     revoke_all_sessions,
+    revoke_other_sessions,
     revoke_session_for_refresh_reuse,
     revoke_session,
     rotate_session_refresh,
 )
 from .throttles import (
+    ChangePasswordThrottle,
     LoginThrottle,
     PasswordResetThrottle,
     RegistrationThrottle,
@@ -73,6 +76,27 @@ def request_context(request):
     return {"ip_address": get_client_ip(request), "user_agent": get_user_agent(request)}
 
 
+def registration_conflict_errors(exc, validated_data):
+    errors = {}
+    constraint_name = getattr(getattr(getattr(exc, "__cause__", None), "diag", None), "constraint_name", "")
+    error_text = f"{constraint_name} {exc}".lower()
+    email = validated_data["email"]
+    matric_number = validated_data["matric_number"]
+    if (
+        "accounts_user_email_ci_unique" in error_text
+        or "accounts_user.email" in error_text
+        or User.objects.filter(email__iexact=email).exists()
+    ):
+        errors["email"] = ["An account with this email already exists."]
+    if (
+        "accounts_user_matric_ci_unique" in error_text
+        or "accounts_user.matric_number" in error_text
+        or User.objects.filter(matric_number__iexact=matric_number).exists()
+    ):
+        errors["matric_number"] = ["An account with this matric number already exists."]
+    return errors
+
+
 class RegistrationView(APIView):
     permission_classes = [AllowAny]
     authentication_classes = []
@@ -83,13 +107,22 @@ class RegistrationView(APIView):
     def post(self, request):
         serializer = RegistrationSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
-        user = serializer.save()
+        try:
+            with transaction.atomic():
+                user = serializer.save()
+        except IntegrityError as exc:
+            errors = registration_conflict_errors(exc, serializer.validated_data)
+            if not errors:
+                raise
+            raise ValidationError(errors)
         _, raw_token = issue_one_time_token(
             user,
             OneTimeToken.Purpose.EMAIL_VERIFICATION,
             timedelta(hours=settings.EMAIL_VERIFICATION_HOURS),
         )
-        send_verification_email(user, raw_token)
+        transaction.on_commit(
+            lambda user=user, raw_token=raw_token: send_verification_email(user, raw_token)
+        )
         record_event(AuditLog.Event.REGISTRATION, subject=user, **request_context(request))
         return Response(
             {"message": "Registration successful. Check your email to verify your account."},
@@ -139,7 +172,9 @@ class ResendVerificationView(APIView):
                 OneTimeToken.Purpose.EMAIL_VERIFICATION,
                 timedelta(hours=settings.EMAIL_VERIFICATION_HOURS),
             )
-            send_verification_email(user, raw_token)
+            transaction.on_commit(
+                lambda user=user, raw_token=raw_token: send_verification_email(user, raw_token)
+            )
             record_event(AuditLog.Event.VERIFICATION_RESENT, subject=user, **request_context(request))
         return Response({"message": "If the account is awaiting verification, a new link has been sent."})
 
@@ -281,7 +316,9 @@ class PasswordResetRequestView(APIView):
                 OneTimeToken.Purpose.PASSWORD_RESET,
                 timedelta(minutes=settings.PASSWORD_RESET_MINUTES),
             )
-            send_password_reset_email(user, raw_token)
+            transaction.on_commit(
+                lambda user=user, raw_token=raw_token: send_password_reset_email(user, raw_token)
+            )
             record_event(AuditLog.Event.PASSWORD_RESET_REQUESTED, subject=user, **request_context(request))
         return Response({"message": "If an active account uses that email, a reset link has been sent."})
 
@@ -325,6 +362,30 @@ class MeView(APIView):
     @extend_schema(responses={200: UserSerializer})
     def get(self, request):
         return Response(UserSerializer(request.user).data)
+
+
+class ChangePasswordView(APIView):
+    permission_classes = [IsAuthenticated]
+    throttle_classes = [ChangePasswordThrottle]
+
+    @extend_schema(request=ChangePasswordSerializer, responses={200: MessageSerializer})
+    @transaction.atomic
+    def post(self, request):
+        user = User.objects.select_for_update().get(pk=request.user.pk)
+        serializer = ChangePasswordSerializer(data=request.data, context={"user": user})
+        serializer.is_valid(raise_exception=True)
+        user.set_password(serializer.validated_data["new_password"])
+        user.save(update_fields=("password",))
+        revoked_count = revoke_other_sessions(user, request.auth_session, "password_changed")
+        record_event(
+            AuditLog.Event.PASSWORD_CHANGED,
+            actor=user,
+            subject=user,
+            metadata={"sessions_revoked": revoked_count},
+            **request_context(request),
+        )
+        transaction.on_commit(lambda user=user: send_password_changed_email(user))
+        return Response({"message": "Password changed successfully."})
 
 
 class SessionListView(APIView):

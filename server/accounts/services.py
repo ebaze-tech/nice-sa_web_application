@@ -15,11 +15,10 @@ from .utils import identifier_digest
 def check_login_lock(identifier):
     digest = identifier_digest(identifier)
     now = timezone.now()
+    LoginAttempt.objects.filter(locked_until__isnull=False, locked_until__lte=now).delete()
     attempt = LoginAttempt.objects.filter(identifier_hash=digest).first()
     if attempt and attempt.locked_until and attempt.locked_until > now:
         raise LoginLocked()
-    if attempt and attempt.locked_until and attempt.locked_until <= now:
-        LoginAttempt.objects.filter(pk=attempt.pk).update(failed_count=0, locked_until=None)
 
 
 @transaction.atomic
@@ -107,4 +106,18 @@ def revoke_all_sessions(user, reason):
         blacklist_session(session)
     now = timezone.now()
     user.auth_sessions.filter(revoked_at__isnull=True).update(revoked_at=now, revoke_reason=reason)
+    return len(sessions)
+
+
+def revoke_other_sessions(user, current_session, reason):
+    sessions = list(
+        user.auth_sessions.filter(revoked_at__isnull=True).exclude(pk=current_session.pk)
+    )
+    for session in sessions:
+        blacklist_session(session)
+    now = timezone.now()
+    user.auth_sessions.filter(revoked_at__isnull=True).exclude(pk=current_session.pk).update(
+        revoked_at=now,
+        revoke_reason=reason,
+    )
     return len(sessions)

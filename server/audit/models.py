@@ -14,6 +14,7 @@ class AuditLog(models.Model):
         SESSION_REVOKED = "session_revoked", "Session revoked"
         PASSWORD_RESET_REQUESTED = "password_reset_requested", "Password reset requested"
         PASSWORD_RESET_COMPLETED = "password_reset_completed", "Password reset completed"
+        PASSWORD_CHANGED = "password_changed", "Password changed"
         ROLE_CHANGED = "role_changed", "Role changed"
         PERMISSIONS_CHANGED = "permissions_changed", "Permissions changed"
 

@@ -1,13 +1,19 @@
 import re
+import os
+import subprocess
+import sys
 from datetime import timedelta
 from unittest import mock
 from urllib.parse import parse_qs, urlparse
 
 from django.conf import settings
+from django.contrib import admin
 from django.contrib.auth.models import Permission
+from django.core.exceptions import ValidationError as DjangoValidationError
 from django.core import mail
 from django.core.cache import cache
-from django.test import override_settings
+from django.db import IntegrityError, transaction
+from django.test import RequestFactory, SimpleTestCase, override_settings
 from django.utils import timezone
 from rest_framework.test import APIClient, APIRequestFactory, APITestCase, force_authenticate
 from rest_framework.views import APIView
@@ -15,9 +21,13 @@ from rest_framework_simplejwt.tokens import AccessToken
 
 from audit.models import AuditLog
 
-from .models import AuthSession, OneTimeToken, User
+from .admin import NicesaUserAdmin
+from .forms import NicesaAdminPasswordChangeForm, NicesaUserCreationForm
+from .models import AuthSession, LoginAttempt, OneTimeToken, User
 from .permissions import HasNicesaPermission
+from .services import issue_session_tokens
 from .throttles import (
+    ChangePasswordThrottle,
     LoginThrottle,
     PasswordResetThrottle,
     RegistrationThrottle,
@@ -88,11 +98,16 @@ class AuthTestMixin:
         self.assertIsNotNone(match)
         return parse_qs(urlparse(match.group(0)).query)["token"][0]
 
+    def post_with_commits(self, path, data, client=None, **headers):
+        client = client or self.client
+        with self.captureOnCommitCallbacks(execute=True):
+            return client.post(path, data, **headers)
+
 
 @override_settings(**TEST_SETTINGS)
 class RegistrationAndVerificationTests(AuthTestMixin, APITestCase):
     def test_student_registration_normalizes_and_requires_verification(self):
-        response = self.client.post("/api/v1/auth/register/", self.registration_payload())
+        response = self.post_with_commits("/api/v1/auth/register/", self.registration_payload())
 
         self.assertEqual(response.status_code, 201, response.data)
         user = User.objects.get()
@@ -146,8 +161,55 @@ class RegistrationAndVerificationTests(AuthTestMixin, APITestCase):
         self.assertEqual(response.status_code, 400)
         self.assertIn("matric_number", response.data["error"]["fields"])
 
+    def test_registration_validates_matric_length_after_normalization(self):
+        normalized_short = self.registration_payload(
+            matric_number=f"{' ' * 70}ce/2024/001{' ' * 70}"
+        )
+        accepted = self.client.post("/api/v1/auth/register/", normalized_short)
+        rejected = self.client.post(
+            "/api/v1/auth/register/",
+            self.registration_payload(
+                email="other@stu.ui.edu.ng",
+                matric_number="CE/" + "1" * 62,
+            ),
+        )
+
+        self.assertEqual(accepted.status_code, 201, accepted.data)
+        self.assertEqual(rejected.status_code, 400)
+        self.assertIn("matric_number", rejected.data["error"]["fields"])
+
+    def test_registration_translates_database_email_and_matric_conflicts(self):
+        cases = (
+            ("accounts_user_email_ci_unique", "email"),
+            ("accounts_user_matric_ci_unique", "matric_number"),
+        )
+        for constraint, field in cases:
+            with self.subTest(field=field), mock.patch(
+                "accounts.views.RegistrationSerializer.save",
+                side_effect=IntegrityError(f"UNIQUE constraint failed: index '{constraint}'"),
+            ):
+                response = self.client.post(
+                    "/api/v1/auth/register/",
+                    self.registration_payload(
+                        email=f"{field}@stu.ui.edu.ng",
+                        matric_number=f"CE/2024/{field}",
+                    ),
+                )
+            self.assertEqual(response.status_code, 400, response.data)
+            self.assertIn(field, response.data["error"]["fields"])
+
+    def test_verification_email_is_deferred_until_commit(self):
+        with self.captureOnCommitCallbacks(execute=False) as callbacks:
+            response = self.client.post("/api/v1/auth/register/", self.registration_payload())
+
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(len(mail.outbox), 0)
+        self.assertEqual(len(callbacks), 1)
+        callbacks[0]()
+        self.assertEqual(len(mail.outbox), 1)
+
     def test_verification_is_single_use_and_activates_account(self):
-        self.client.post("/api/v1/auth/register/", self.registration_payload())
+        self.post_with_commits("/api/v1/auth/register/", self.registration_payload())
         token = self.extract_email_token()
 
         first = self.client.post("/api/v1/auth/verify-email/", {"token": token})
@@ -159,7 +221,7 @@ class RegistrationAndVerificationTests(AuthTestMixin, APITestCase):
         self.assertTrue(AuditLog.objects.filter(event=AuditLog.Event.EMAIL_VERIFIED).exists())
 
     def test_expired_verification_token_is_rejected(self):
-        self.client.post("/api/v1/auth/register/", self.registration_payload())
+        self.post_with_commits("/api/v1/auth/register/", self.registration_payload())
         token = self.extract_email_token()
         OneTimeToken.objects.update(expires_at=timezone.now() - timedelta(seconds=1))
 
@@ -169,9 +231,9 @@ class RegistrationAndVerificationTests(AuthTestMixin, APITestCase):
         self.assertFalse(User.objects.get().is_active)
 
     def test_resend_is_generic_and_invalidates_previous_link(self):
-        self.client.post("/api/v1/auth/register/", self.registration_payload())
+        self.post_with_commits("/api/v1/auth/register/", self.registration_payload())
         old_token = self.extract_email_token()
-        known = self.client.post(
+        known = self.post_with_commits(
             "/api/v1/auth/resend-verification/",
             {"email": "ADA.OKAFOR@stu.ui.edu.ng"},
         )
@@ -342,13 +404,33 @@ class LoginAndSessionTests(AuthTestMixin, APITestCase):
         self.assertEqual(session.ip_address, "203.0.113.8")
         self.assertEqual(session.user_agent, "NICESA test browser")
 
+    def test_login_throttle_cannot_be_bypassed_by_rotating_identifiers(self):
+        cache.clear()
+        with mock.patch.object(LoginThrottle, "rate", "2/minute", create=True):
+            self.login("first@stu.ui.edu.ng", "wrong", REMOTE_ADDR="203.0.113.10")
+            self.login("second@stu.ui.edu.ng", "wrong", REMOTE_ADDR="203.0.113.10")
+            response = self.login("third@stu.ui.edu.ng", "wrong", REMOTE_ADDR="203.0.113.10")
+
+        self.assertEqual(response.status_code, 429, response.data)
+
+    def test_login_flow_deletes_expired_locked_attempt_rows(self):
+        LoginAttempt.objects.create(
+            identifier_hash="a" * 64,
+            failed_count=5,
+            locked_until=timezone.now() - timedelta(seconds=1),
+        )
+
+        self.login("unknown@stu.ui.edu.ng", "wrong")
+
+        self.assertFalse(LoginAttempt.objects.filter(identifier_hash="a" * 64).exists())
+
 
 @override_settings(**TEST_SETTINGS)
 class PasswordResetTests(AuthTestMixin, APITestCase):
     def test_request_is_generic_for_known_and_unknown_emails(self):
         self.create_active_user()
 
-        known = self.client.post(
+        known = self.post_with_commits(
             "/api/v1/auth/password-reset/",
             {"email": "ada.okafor@stu.ui.edu.ng"},
         )
@@ -365,7 +447,7 @@ class PasswordResetTests(AuthTestMixin, APITestCase):
         user = self.create_active_user()
         login = self.authenticate("CE/2024/001")
         self.client.credentials()
-        self.client.post(
+        self.post_with_commits(
             "/api/v1/auth/password-reset/",
             {"email": "ada.okafor@stu.ui.edu.ng"},
         )
@@ -396,7 +478,7 @@ class PasswordResetTests(AuthTestMixin, APITestCase):
 
     def test_expired_reset_token_is_rejected(self):
         self.create_active_user()
-        self.client.post(
+        self.post_with_commits(
             "/api/v1/auth/password-reset/",
             {"email": "ada.okafor@stu.ui.edu.ng"},
         )
@@ -410,6 +492,97 @@ class PasswordResetTests(AuthTestMixin, APITestCase):
 
         self.assertEqual(response.status_code, 400)
         self.assertIn("token", response.data["error"]["fields"])
+
+    def test_reset_email_is_deferred_until_commit(self):
+        self.create_active_user()
+        with self.captureOnCommitCallbacks(execute=False) as callbacks:
+            response = self.client.post(
+                "/api/v1/auth/password-reset/",
+                {"email": "ada.okafor@stu.ui.edu.ng"},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(len(mail.outbox), 0)
+        self.assertEqual(len(callbacks), 1)
+
+
+@override_settings(**TEST_SETTINGS)
+class ChangePasswordTests(AuthTestMixin, APITestCase):
+    def setUp(self):
+        super().setUp()
+        self.user = self.create_active_user()
+
+    def change_password(self, client=None, **changes):
+        payload = {"current_password": PASSWORD, "new_password": NEW_PASSWORD}
+        payload.update(changes)
+        return (client or self.client).post("/api/v1/auth/change-password/", payload)
+
+    def test_change_password_succeeds_audits_and_emails_after_commit(self):
+        self.authenticate(self.user.email)
+        with self.captureOnCommitCallbacks(execute=True):
+            response = self.change_password()
+
+        self.user.refresh_from_db()
+        self.assertEqual(response.status_code, 200, response.data)
+        self.assertTrue(self.user.check_password(NEW_PASSWORD))
+        self.assertTrue(
+            AuditLog.objects.filter(event=AuditLog.Event.PASSWORD_CHANGED, subject=self.user).exists()
+        )
+        self.assertEqual(len(mail.outbox), 1)
+        self.assertNotIn(PASSWORD, mail.outbox[0].body)
+        self.assertNotIn(NEW_PASSWORD, mail.outbox[0].body)
+
+    def test_wrong_current_password_is_a_field_error(self):
+        self.authenticate(self.user.email)
+        response = self.change_password(current_password="wrong")
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("current_password", response.data["error"]["fields"])
+
+    def test_weak_new_password_is_a_field_error(self):
+        self.authenticate(self.user.email)
+        response = self.change_password(new_password="weak")
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("new_password", response.data["error"]["fields"])
+
+    def test_new_password_must_differ_from_current_password(self):
+        self.authenticate(self.user.email)
+        response = self.change_password(new_password=PASSWORD)
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("new_password", response.data["error"]["fields"])
+
+    def test_change_password_requires_authentication(self):
+        response = self.change_password()
+
+        self.assertEqual(response.status_code, 401)
+
+    def test_change_password_revokes_other_sessions_but_keeps_current_session(self):
+        current_client = APIClient()
+        other_client = APIClient()
+        current_login = self.authenticate(self.user.email, client=current_client)
+        other_login = self.authenticate(self.user.email, client=other_client)
+
+        response = self.change_password(client=current_client)
+        current_me = current_client.get("/api/v1/auth/me/")
+        other_me = other_client.get("/api/v1/auth/me/")
+
+        self.assertEqual(response.status_code, 200, response.data)
+        self.assertEqual(current_me.status_code, 200)
+        self.assertEqual(other_me.status_code, 401)
+        self.assertTrue(AuthSession.objects.get(pk=current_login.data["session_id"]).is_active)
+        self.assertFalse(AuthSession.objects.get(pk=other_login.data["session_id"]).is_active)
+
+    def test_change_password_is_throttled_per_user(self):
+        self.authenticate(self.user.email)
+        cache.clear()
+        with mock.patch.object(ChangePasswordThrottle, "rate", "2/hour", create=True):
+            self.change_password(current_password="wrong-one")
+            self.change_password(current_password="wrong-two")
+            response = self.change_password(current_password="wrong-three")
+
+        self.assertEqual(response.status_code, 429, response.data)
 
 
 @override_settings(**TEST_SETTINGS)
@@ -564,6 +737,136 @@ class AuthorizationTests(AuthTestMixin, APITestCase):
         self.assertFalse(checker.has_permission(request, view))
 
 
+@override_settings(**TEST_SETTINGS)
+class UserModelAndAdminTests(AuthTestMixin, APITestCase):
+    def test_admin_role_requires_superuser_in_model_validation_and_database(self):
+        invalid = User(
+            email="invalid-admin@nicesa.org",
+            role=User.Role.ADMIN,
+            is_superuser=False,
+        )
+        with self.assertRaises(DjangoValidationError):
+            invalid.full_clean()
+
+        with self.assertRaises(IntegrityError), transaction.atomic():
+            User.objects.create(
+                email="invalid-db-admin@nicesa.org",
+                role=User.Role.ADMIN,
+                is_superuser=False,
+            )
+
+    def test_custom_admin_add_form_uses_email_and_custom_profile_fields(self):
+        form = NicesaUserCreationForm(
+            data={
+                "email": "created-in-admin@stu.ui.edu.ng",
+                "password1": PASSWORD,
+                "password2": PASSWORD,
+                "first_name": "Admin",
+                "last_name": "Created",
+                "matric_number": "CE/2024/050",
+                "level": 200,
+                "is_active": True,
+            }
+        )
+
+        self.assertTrue(form.is_valid(), form.errors)
+        user = form.save()
+        self.assertEqual(user.email, "created-in-admin@stu.ui.edu.ng")
+        self.assertEqual(user.matric_number, "CE/2024/050")
+
+    def test_admin_deactivation_revokes_all_api_sessions(self):
+        user = self.create_active_user()
+        issue_session_tokens(user)
+        issue_session_tokens(user)
+        user.is_active = False
+        model_admin = NicesaUserAdmin(User, admin.site)
+
+        model_admin.save_model(RequestFactory().post("/admin/"), user, mock.Mock(), True)
+
+        self.assertFalse(AuthSession.objects.filter(user=user, revoked_at__isnull=True).exists())
+
+    def test_admin_password_change_revokes_all_api_sessions(self):
+        user = self.create_active_user()
+        issue_session_tokens(user)
+        form = NicesaAdminPasswordChangeForm(
+            user,
+            data={"password1": NEW_PASSWORD, "password2": NEW_PASSWORD},
+        )
+
+        self.assertTrue(form.is_valid(), form.errors)
+        form.save()
+
+        self.assertFalse(AuthSession.objects.filter(user=user, revoked_at__isnull=True).exists())
+
+
+class ProductionSettingsTests(SimpleTestCase):
+    required = (
+        "DJANGO_SECRET_KEY",
+        "DATABASE_URL",
+        "DJANGO_ALLOWED_HOSTS",
+        "FRONTEND_VERIFY_URL",
+        "FRONTEND_PASSWORD_RESET_URL",
+    )
+
+    def production_env(self):
+        env = os.environ.copy()
+        env.update(
+            {
+                "DJANGO_ENV": "production",
+                "DJANGO_SECRET_KEY": "p" * 40,
+                "DATABASE_URL": "sqlite:///:memory:",
+                "DJANGO_ALLOWED_HOSTS": "api.example.com",
+                "FRONTEND_VERIFY_URL": "https://example.com/verify-email",
+                "FRONTEND_PASSWORD_RESET_URL": "https://example.com/reset-password",
+                "DJANGO_DEBUG": "",
+                "CORS_ALLOWED_ORIGINS": "",
+                "CSRF_TRUSTED_ORIGINS": "",
+            }
+        )
+        return env
+
+    def import_settings(self, env):
+        return subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                (
+                    "import config.settings as settings; "
+                    "print(settings.DEBUG, settings.CORS_ALLOWED_ORIGINS, settings.CSRF_TRUSTED_ORIGINS)"
+                ),
+            ],
+            cwd=settings.BASE_DIR,
+            env=env,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+    def test_production_requires_each_fail_closed_setting(self):
+        for name in self.required:
+            with self.subTest(name=name):
+                env = self.production_env()
+                env[name] = ""
+                result = self.import_settings(env)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(name, result.stderr)
+
+    def test_production_requires_a_32_character_secret(self):
+        env = self.production_env()
+        env["DJANGO_SECRET_KEY"] = "too-short"
+
+        result = self.import_settings(env)
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("at least 32 characters", result.stderr)
+
+    def test_production_debug_defaults_to_false(self):
+        result = self.import_settings(self.production_env())
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), "False [] []")
+
+
 # ---------------------------------------------------------------------------
 # Password policy tests
 # ---------------------------------------------------------------------------
@@ -688,7 +991,7 @@ class PasswordPolicyResetTests(AuthTestMixin, APITestCase):
     def setUp(self):
         super().setUp()
         self.user = self.create_active_user()
-        self.client.post(
+        self.post_with_commits(
             "/api/v1/auth/password-reset/",
             {"email": "ada.okafor@stu.ui.edu.ng"},
         )
