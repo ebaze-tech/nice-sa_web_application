@@ -155,8 +155,6 @@ Permission failures consistently return:
 }
 ```
 
-Validation failures use the same envelope with field-level entries in `error.fields`. Login and password-reset request responses are deliberately generic to avoid identifier enumeration.
-
 ## Email and expiry
 
 Development uses Django's console email backend. Any other `DJANGO_ENV` uses SMTP from environment variables. Verification links expire after 24 hours; password-reset links expire after 60 minutes. Issuing a new link invalidates the previous unused link, and successful password reset invalidates all sessions. Verification, reset, and password-change emails are sent only after the surrounding database transaction commits.
