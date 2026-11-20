@@ -303,14 +303,14 @@ class PasswordResetConfirmView(APIView):
         if not token or not token.is_usable:
             raise ValidationError({"token": ["This password reset link is invalid or has expired."]})
         user = token.user
-        password_validation_error = None
+        new_password = serializer.validated_data["new_password"]
+        # Re-run with the real user so UserAttributeSimilarityValidator can compare
+        # the password against email, first_name, last_name, and matric_number.
         try:
-            validate_password(serializer.validated_data["new_password"], user=user)
+            validate_password(new_password, user=user)
         except DjangoValidationError as exc:
-            password_validation_error = getattr(exc, "messages", [str(exc)])
-        if password_validation_error:
-            raise ValidationError({"new_password": password_validation_error})
-        user.set_password(serializer.validated_data["new_password"])
+            raise ValidationError({"new_password": getattr(exc, "messages", [str(exc)])}) from exc
+        user.set_password(new_password)
         user.save(update_fields=("password",))
         token.used_at = timezone.now()
         token.save(update_fields=("used_at",))

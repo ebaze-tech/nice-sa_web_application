@@ -11,7 +11,7 @@ class RegistrationSerializer(serializers.ModelSerializer):
     first_name = serializers.CharField(max_length=150, allow_blank=False)
     last_name = serializers.CharField(max_length=150, allow_blank=False)
     matric_number = serializers.CharField(max_length=64, allow_blank=False)
-    password = serializers.CharField(write_only=True, trim_whitespace=False)
+    password = serializers.CharField(write_only=True, trim_whitespace=False, max_length=128)
 
     class Meta:
         model = User
@@ -81,7 +81,21 @@ class LoginSerializer(serializers.Serializer):
 
 
 class PasswordResetConfirmSerializer(TokenSerializer):
-    new_password = serializers.CharField(write_only=True, trim_whitespace=False)
+    new_password = serializers.CharField(write_only=True, trim_whitespace=False, max_length=128)
+
+    def validate_new_password(self, value):
+        # Run validators here so errors are field-level and reported all at once.
+        # The view still passes the user object for similarity checks.
+        # We do a preliminary run without a user so the serializer can fail fast
+        # on composition rules before the view looks up the token; the view will
+        # re-run validation with the real user for similarity checking.
+        try:
+            password_validation.validate_password(value)
+        except Exception as exc:
+            raise serializers.ValidationError(
+                getattr(exc, "messages", [str(exc)])
+            ) from exc
+        return value
 
 
 class UserSerializer(serializers.ModelSerializer):

@@ -63,6 +63,26 @@ Registration accepts `first_name`, `last_name`, `email`, `matric_number`, `level
 
 Matric numbers are trimmed, Unicode-normalized, uppercased, and have repeated internal whitespace collapsed. They may not contain `@` or control characters and are limited to 64 characters. No department-specific regex is enforced because the official matric format has not been confirmed.
 
+
+## Password policy
+
+All passwords — registration, password-reset, and admin-created users — are validated against the following rules. Every violated rule is reported in the same response.
+
+| Rule | Detail |
+| --- | --- |
+| Minimum length | 8 characters |
+| Maximum length | 128 characters (prevents hashing-abuse DoS) |
+| Uppercase letter | At least one A–Z |
+| Lowercase letter | At least one a–z |
+| Digit | At least one 0–9 |
+| Special character | At least one non-alphanumeric printable character |
+| Not similar to user attributes | Compared against email, first name, last name, and matric number |
+| Not on common-password list | Django's built-in list of ~20 000 common passwords |
+| Not entirely numeric | Must contain at least one non-digit character |
+
+Validation errors are returned field-level under `error.fields.password` (registration) or `error.fields.new_password` (password reset) in the standard error envelope.
+
+
 ## Roles and permissions
 
 Roles are `student`, `officer`, and `admin`. Public registration can only create students. Administrators are superusers created with `createsuperuser`; an admin promotes an existing non-admin user to officer and supplies the complete permission list.

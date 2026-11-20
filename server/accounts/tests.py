@@ -23,6 +23,7 @@ from .throttles import (
     RegistrationThrottle,
     ResendVerificationThrottle,
 )
+from .validators import PasswordCompositionValidator
 
 
 TEST_SETTINGS = {
@@ -561,3 +562,156 @@ class AuthorizationTests(AuthTestMixin, APITestCase):
         force_authenticate(raw_request, user=User.objects.get(pk=self.student.pk))
         request = view.initialize_request(raw_request)
         self.assertFalse(checker.has_permission(request, view))
+
+
+# ---------------------------------------------------------------------------
+# Password policy tests
+# ---------------------------------------------------------------------------
+
+def _err_text(e):
+    """Extract the message string from either a plain string or a DRF error dict."""
+    return e["message"] if isinstance(e, dict) else e
+
+class PasswordCompositionValidatorUnitTests(APITestCase):
+    """Unit-tests for each composition rule in isolation."""
+
+    def _errors(self, password):
+        """Return the list of error messages raised by the validator."""
+        v = PasswordCompositionValidator()
+        from django.core.exceptions import ValidationError as DjVE
+        try:
+            v.validate(password)
+            return []
+        except DjVE as exc:
+            return list(exc.messages)
+
+    def test_valid_password_passes(self):
+        self.assertEqual(self._errors("A-Strong-Student-Passphrase-204!"), [])
+
+    def test_too_short_fails(self):
+        # 7 chars, otherwise valid
+        errors = self._errors("Abc1!xY")
+        self.assertTrue(any("at least 8" in e for e in errors), errors)
+
+    def test_minimum_length_8_passes(self):
+        # Exactly 8 chars satisfying all rules — must pass.
+        self.assertEqual(self._errors("Abc1!xYz"), [])
+
+    def test_too_long_fails(self):
+        # 129 chars
+        pw = "Aa1!" + "x" * 125
+        errors = self._errors(pw)
+        self.assertTrue(any("128" in e for e in errors), errors)
+
+    def test_missing_uppercase_fails(self):
+        errors = self._errors("abcde1!xyz")
+        self.assertTrue(any("uppercase" in e for e in errors), errors)
+
+    def test_missing_lowercase_fails(self):
+        errors = self._errors("ABCDE1!XYZ")
+        self.assertTrue(any("lowercase" in e for e in errors), errors)
+
+    def test_missing_digit_fails(self):
+        errors = self._errors("Abcde!xyzW")
+        self.assertTrue(any("digit" in e for e in errors), errors)
+
+    def test_missing_special_character_fails(self):
+        errors = self._errors("Abcde1xyzW")
+        self.assertTrue(any("special" in e for e in errors), errors)
+
+    def test_all_rules_reported_at_once(self):
+        # A single-character all-lowercase password violates 5 rules.
+        errors = self._errors("a")
+        self.assertGreaterEqual(len(errors), 4, errors)
+
+    def test_password_is_not_trimmed_before_validation(self):
+        # Leading space should count towards length and special-char rule.
+        # " Abcde1xyzW" has a space (special) and is 11 chars — should pass.
+        self.assertEqual(self._errors(" Abcde1xyzW"), [])
+
+
+@override_settings(**TEST_SETTINGS)
+class PasswordPolicyRegistrationTests(AuthTestMixin, APITestCase):
+    """Confirm the composition policy is enforced at the registration endpoint."""
+
+    def _register(self, password):
+        return self.client.post(
+            "/api/v1/auth/register/",
+            self.registration_payload(password=password),
+        )
+
+    def test_weak_password_rejected_at_registration(self):
+        # 7-char password — too short
+        response = self._register("Abc1!xY")
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("password", response.data["error"]["fields"])
+
+    def test_missing_uppercase_rejected_at_registration(self):
+        response = self._register("abcde1!xyz")
+        self.assertEqual(response.status_code, 400)
+        errors = response.data["error"]["fields"]["password"]
+        self.assertTrue(any("uppercase" in _err_text(e) for e in errors), errors)
+
+    def test_missing_lowercase_rejected_at_registration(self):
+        response = self._register("ABCDE1!XYZ")
+        self.assertEqual(response.status_code, 400)
+        errors = response.data["error"]["fields"]["password"]
+        self.assertTrue(any("lowercase" in _err_text(e) for e in errors), errors)
+
+    def test_missing_digit_rejected_at_registration(self):
+        response = self._register("Abcde!xyzW")
+        self.assertEqual(response.status_code, 400)
+        errors = response.data["error"]["fields"]["password"]
+        self.assertTrue(any("digit" in _err_text(e) for e in errors), errors)
+
+    def test_missing_special_char_rejected_at_registration(self):
+        response = self._register("Abcde1xyzW")
+        self.assertEqual(response.status_code, 400)
+        errors = response.data["error"]["fields"]["password"]
+        self.assertTrue(any("special" in _err_text(e) for e in errors), errors)
+
+    def test_multiple_failures_reported_simultaneously_at_registration(self):
+        response = self._register("a")
+        self.assertEqual(response.status_code, 400)
+        errors = response.data["error"]["fields"]["password"]
+        self.assertGreaterEqual(len(errors), 4, errors)
+
+    def test_strong_password_accepted_at_registration(self):
+        response = self._register(PASSWORD)
+        self.assertEqual(response.status_code, 201, response.data)
+
+
+@override_settings(**TEST_SETTINGS)
+class PasswordPolicyResetTests(AuthTestMixin, APITestCase):
+    """Confirm the composition policy is enforced at password-reset/confirm."""
+
+    def setUp(self):
+        super().setUp()
+        self.user = self.create_active_user()
+        self.client.post(
+            "/api/v1/auth/password-reset/",
+            {"email": "ada.okafor@stu.ui.edu.ng"},
+        )
+        self.reset_token = self.extract_email_token()
+
+    def _confirm(self, new_password):
+        return self.client.post(
+            "/api/v1/auth/password-reset/confirm/",
+            {"token": self.reset_token, "new_password": new_password},
+        )
+
+    def test_weak_password_rejected_at_reset(self):
+        # 7-char password — too short
+        response = self._confirm("Abc1!xY")
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("new_password", response.data["error"]["fields"])
+
+    def test_missing_uppercase_rejected_at_reset(self):
+        response = self._confirm("abcde1!xyz")
+        self.assertEqual(response.status_code, 400)
+        errors = response.data["error"]["fields"]["new_password"]
+        self.assertTrue(any("uppercase" in _err_text(e) for e in errors), errors)
+
+    def test_strong_password_accepted_at_reset(self):
+        response = self._confirm(NEW_PASSWORD)
+        self.assertEqual(response.status_code, 200, response.data)
