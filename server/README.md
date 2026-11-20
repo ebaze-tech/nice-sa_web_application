@@ -13,7 +13,7 @@ This directory contains the Django/DRF backend. The current scope is authenticat
 
 ## Environment variables
 
-`DJANGO_ENV=development` enables the documented local defaults. In every other environment, startup fails unless the five production-required values below are present; there are no SQLite or localhost fallbacks.
+`DJANGO_ENV=development` enables the documented local defaults. In every other environment, startup fails unless the five production-required values below are present.
 
 | Variable | Default | Required in production |
 | --- | --- | --- |
