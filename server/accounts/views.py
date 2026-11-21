@@ -10,7 +10,7 @@ from django.middleware.csrf import get_token
 from django.utils import timezone
 from django.utils.decorators import method_decorator
 from django.views.decorators.csrf import csrf_protect, ensure_csrf_cookie
-from drf_spectacular.utils import extend_schema
+from drf_spectacular.utils import OpenApiExample, PolymorphicProxySerializer, extend_schema
 from rest_framework import status
 from rest_framework.exceptions import NotFound, ValidationError
 from rest_framework.permissions import AllowAny, IsAuthenticated
@@ -42,10 +42,14 @@ from .serializers import (
     RegistrationSerializer,
     TokenSerializer,
     UserSerializer,
+    VerifyEmailCodeSerializer,
+    VerifyEmailLinkSerializer,
+    VerifyEmailSerializer,
 )
 from .services import (
     check_login_lock,
     clear_login_failures,
+    issue_email_verification,
     issue_one_time_token,
     issue_session_tokens,
     record_login_failure,
@@ -54,9 +58,13 @@ from .services import (
     revoke_session_for_refresh_reuse,
     revoke_session,
     rotate_session_refresh,
+    verify_email_code,
+    verify_email_link,
 )
 from .throttles import (
     ChangePasswordThrottle,
+    CodeVerificationAccountThrottle,
+    CodeVerificationIPThrottle,
     LoginThrottle,
     PasswordResetThrottle,
     RegistrationThrottle,
@@ -115,13 +123,11 @@ class RegistrationView(APIView):
             if not errors:
                 raise
             raise ValidationError(errors)
-        _, raw_token = issue_one_time_token(
-            user,
-            OneTimeToken.Purpose.EMAIL_VERIFICATION,
-            timedelta(hours=settings.EMAIL_VERIFICATION_HOURS),
-        )
+        _, raw_token, raw_code = issue_email_verification(user)
         transaction.on_commit(
-            lambda user=user, raw_token=raw_token: send_verification_email(user, raw_token)
+            lambda user=user, raw_token=raw_token, raw_code=raw_code: send_verification_email(
+                user, raw_token, raw_code
+            )
         )
         record_event(AuditLog.Event.REGISTRATION, subject=user, **request_context(request))
         return Response(
@@ -133,25 +139,72 @@ class RegistrationView(APIView):
 class VerifyEmailView(APIView):
     permission_classes = [AllowAny]
     authentication_classes = []
+    throttle_classes = [CodeVerificationAccountThrottle, CodeVerificationIPThrottle]
 
-    @extend_schema(request=TokenSerializer, responses={200: MessageSerializer})
-    @transaction.atomic
+    def throttled(self, request, wait):
+        record_event(
+            AuditLog.Event.EMAIL_VERIFICATION_FAILED,
+            metadata={"method": "code", "reason": "throttled"},
+            **request_context(request),
+        )
+        return super().throttled(request, wait)
+
+    @extend_schema(
+        request=PolymorphicProxySerializer(
+            component_name="VerifyEmailRequest",
+            serializers=[VerifyEmailCodeSerializer, VerifyEmailLinkSerializer],
+            resource_type_field_name=None,
+        ),
+        responses={200: MessageSerializer},
+        description=(
+            "Verify an account using exactly one method: the token from the email link, "
+            "or the account email plus the numeric verification code. Send the code as "
+            "a string so leading zeros are preserved. Invalid, expired, exhausted, and "
+            "already-used credentials return the same generic error."
+        ),
+        examples=[
+            OpenApiExample(
+                "Verification code",
+                value={
+                    "email": "ada.okafor@stu.ui.edu.ng",
+                    "code": "0" * settings.EMAIL_VERIFICATION_CODE_LENGTH,
+                },
+                request_only=True,
+            ),
+            OpenApiExample(
+                "Verification link token",
+                value={"token": "single-use-token-from-link"},
+                request_only=True,
+            ),
+        ],
+    )
     def post(self, request):
-        serializer = TokenSerializer(data=request.data)
+        serializer = VerifyEmailSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
-        token = OneTimeToken.objects.select_for_update().filter(
-            purpose=OneTimeToken.Purpose.EMAIL_VERIFICATION,
-            digest=token_digest(serializer.validated_data["token"]),
-        ).select_related("user").first()
-        if not token or not token.is_usable:
-            raise ValidationError({"token": ["This verification link is invalid or has expired."]})
-        token.used_at = timezone.now()
-        token.save(update_fields=("used_at",))
-        user = token.user
-        if not user.is_active:
-            user.is_active = True
-            user.save(update_fields=("is_active",))
-        record_event(AuditLog.Event.EMAIL_VERIFIED, subject=user, **request_context(request))
+        if "token" in serializer.validated_data:
+            method = "link"
+            user = verify_email_link(serializer.validated_data["token"])
+        else:
+            method = "code"
+            user = verify_email_code(
+                serializer.validated_data["email"],
+                serializer.validated_data["code"],
+            )
+        if not user:
+            record_event(
+                AuditLog.Event.EMAIL_VERIFICATION_FAILED,
+                metadata={"method": method},
+                **request_context(request),
+            )
+            raise ValidationError(
+                {"non_field_errors": ["This verification code or link is invalid or expired."]}
+            )
+        record_event(
+            AuditLog.Event.EMAIL_VERIFIED,
+            subject=user,
+            metadata={"method": method},
+            **request_context(request),
+        )
         return Response({"message": "Email verified. You can now sign in."})
 
 
@@ -167,16 +220,16 @@ class ResendVerificationView(APIView):
         serializer.is_valid(raise_exception=True)
         user = User.objects.filter(email__iexact=serializer.validated_data["email"], is_active=False).first()
         if user:
-            _, raw_token = issue_one_time_token(
-                user,
-                OneTimeToken.Purpose.EMAIL_VERIFICATION,
-                timedelta(hours=settings.EMAIL_VERIFICATION_HOURS),
-            )
+            _, raw_token, raw_code = issue_email_verification(user)
             transaction.on_commit(
-                lambda user=user, raw_token=raw_token: send_verification_email(user, raw_token)
+                lambda user=user, raw_token=raw_token, raw_code=raw_code: send_verification_email(
+                    user, raw_token, raw_code
+                )
             )
             record_event(AuditLog.Event.VERIFICATION_RESENT, subject=user, **request_context(request))
-        return Response({"message": "If the account is awaiting verification, a new link has been sent."})
+        return Response(
+            {"message": "If the account is awaiting verification, a new code and link have been sent."}
+        )
 
 
 @method_decorator(ensure_csrf_cookie, name="dispatch")

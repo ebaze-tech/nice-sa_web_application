@@ -39,6 +39,8 @@ This directory contains the Django/DRF backend. The current scope is authenticat
 | `LOGIN_THROTTLE_RATE` | `10/minute` | No |
 | `REGISTRATION_THROTTLE_RATE` | `5/hour` | No |
 | `RESEND_VERIFICATION_THROTTLE_RATE` | `5/hour` | No |
+| `EMAIL_VERIFICATION_CODE_ACCOUNT_THROTTLE_RATE` | `10/minute` | No |
+| `EMAIL_VERIFICATION_CODE_IP_THROTTLE_RATE` | `30/minute` | No |
 | `PASSWORD_RESET_THROTTLE_RATE` | `5/hour` | No |
 | `CHANGE_PASSWORD_THROTTLE_RATE` | `10/hour` | No |
 | `JWT_ACCESS_MINUTES` | `5` | No |
@@ -54,6 +56,8 @@ This directory contains the Django/DRF backend. The current scope is authenticat
 | `FRONTEND_VERIFY_URL` | `http://localhost:3000/verify-email` in development | Yes |
 | `FRONTEND_PASSWORD_RESET_URL` | `http://localhost:3000/reset-password` in development | Yes |
 | `EMAIL_VERIFICATION_HOURS` | `24` | No |
+| `EMAIL_VERIFICATION_CODE_MINUTES` | `15` | No |
+| `EMAIL_VERIFICATION_CODE_LENGTH` | `5` | No |
 | `PASSWORD_RESET_MINUTES` | `60` | No |
 | `LOGIN_MAX_FAILURES` | `5` | No |
 | `LOGIN_LOCKOUT_MINUTES` | `15` | No |
@@ -94,8 +98,8 @@ All endpoints are under `/api/v1/auth/`.
 | --- | --- | --- |
 | GET | `csrf/` | Set/return a CSRF token for the SPA. |
 | POST | `register/` | Register an inactive student account. |
-| POST | `verify-email/` | Consume a single-use verification token. |
-| POST | `resend-verification/` | Generically request another verification email. |
+| POST | `verify-email/` | Verify with either a single-use link token or an email plus numeric code. |
+| POST | `resend-verification/` | Generically request a replacement code and link. |
 | POST | `login/` | Login with one email-or-matric `identifier` and password. |
 | POST | `refresh/` | Rotate the refresh cookie and return a new access token. |
 | POST | `logout/` | Revoke the current session and clear the refresh cookie. |
@@ -114,6 +118,17 @@ All endpoints are under `/api/v1/auth/`.
 Swagger UI is at `/api/v1/docs/`; the raw OpenAPI schema is at `/api/v1/schema/`. Generate and validate a file with `python manage.py spectacular --file openapi.yaml --validate`.
 
 Registration accepts `first_name`, `last_name`, `email`, `matric_number`, `level`, and `password`. Student email matching is case-insensitive and limited to `@stu.ui.edu.ng`. Levels are 100, 200, 300, 400, or 500. Registration always creates an inactive student; only email verification activates the account.
+
+The verification screen should use the code flow as its primary method. Submit the account email and code together, with the code encoded as a JSON string so leading zeros are retained:
+
+```json
+{
+  "email": "ada.okafor@stu.ui.edu.ng",
+  "code": "01234"
+}
+```
+
+The existing link flow remains supported by sending `{"token": "..."}` to the same endpoint. Send exactly one method per request. Invalid, expired, exhausted, and already-used verification credentials all return the same generic error.
 
 Matric numbers are trimmed, Unicode-normalized, uppercased, and have repeated internal whitespace collapsed. They may not contain `@` or control characters and are limited to 64 characters. No department-specific regex is enforced because the official matric format has not been confirmed.
 
@@ -157,7 +172,7 @@ Permission failures consistently return:
 
 ## Email and expiry
 
-Development uses Django's console email backend. Any other `DJANGO_ENV` uses SMTP from environment variables. Verification links expire after 24 hours; password-reset links expire after 60 minutes. Issuing a new link invalidates the previous unused link, and successful password reset invalidates all sessions. Verification, reset, and password-change emails are sent only after the surrounding database transaction commits.
+Development uses Django's console email backend. Any other `DJANGO_ENV` uses SMTP from environment variables. Each verification email leads with a numeric code and includes the link as a secondary option. The code length is controlled by `EMAIL_VERIFICATION_CODE_LENGTH` (default `5`), and codes must always be handled as strings. Codes expire after 15 minutes by default; links expire after 24 hours. A code allows at most five wrong attempts. Code verification is throttled independently per normalized account email and client IP. Issuing a new verification email invalidates the previous code and link, and successfully using either method invalidates both. Password-reset links expire after 60 minutes, and successful password reset invalidates all sessions. Verification success and failure are audited without recording credentials. Verification, reset, and password-change emails are sent only after the surrounding database transaction commits.
 
 
 ## Tests

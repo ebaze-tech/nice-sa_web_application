@@ -64,10 +64,26 @@ class AuthSessionAdmin(admin.ModelAdmin):
 
 @admin.register(OneTimeToken)
 class OneTimeTokenAdmin(admin.ModelAdmin):
-    list_display = ("user", "purpose", "created_at", "expires_at", "used_at")
+    list_display = (
+        "user",
+        "purpose",
+        "created_at",
+        "expires_at",
+        "code_expires_at",
+        "code_failed_attempts",
+        "used_at",
+    )
     list_filter = ("purpose", "created_at", "used_at")
-    exclude = ("digest",)
-    readonly_fields = ("user", "purpose", "created_at", "expires_at", "used_at")
+    exclude = ("digest", "code_digest")
+    readonly_fields = (
+        "user",
+        "purpose",
+        "created_at",
+        "expires_at",
+        "code_expires_at",
+        "code_failed_attempts",
+        "used_at",
+    )
     search_fields = ("user__email",)
 
     def has_add_permission(self, request):

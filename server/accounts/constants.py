@@ -1,6 +1,9 @@
 from dataclasses import dataclass
 
 
+EMAIL_VERIFICATION_CODE_MAX_ATTEMPTS = 5
+
+
 @dataclass(frozen=True)
 class PermissionDefinition:
     codename: str

@@ -35,6 +35,14 @@ def token_digest(value: str) -> str:
     return hashlib.sha256(value.encode()).hexdigest()
 
 
+def verification_code_digest(user_id: int, code: str) -> str:
+    return hmac.new(
+        settings.SECRET_KEY.encode(),
+        f"email-verification:{user_id}:{code}".encode(),
+        hashlib.sha256,
+    ).hexdigest()
+
+
 def get_client_ip(request) -> str | None:
     forwarded_for = request.META.get("HTTP_X_FORWARDED_FOR", "")
     trusted_count = max(int(getattr(settings, "TRUSTED_PROXY_COUNT", 0)), 0)

@@ -1,3 +1,4 @@
+import hmac
 from datetime import timedelta
 
 from django.conf import settings
@@ -8,8 +9,9 @@ from rest_framework_simplejwt.token_blacklist.models import BlacklistedToken, Ou
 from rest_framework_simplejwt.state import token_backend
 
 from .exceptions import LoginLocked, RevokedSession
-from .models import AuthSession, LoginAttempt, OneTimeToken
-from .utils import identifier_digest
+from .constants import EMAIL_VERIFICATION_CODE_MAX_ATTEMPTS
+from .models import AuthSession, LoginAttempt, OneTimeToken, User
+from .utils import identifier_digest, normalize_email, token_digest, verification_code_digest
 
 
 def check_login_lock(identifier):
@@ -37,6 +39,81 @@ def clear_login_failures(identifier):
 
 def issue_one_time_token(user, purpose, lifetime):
     return OneTimeToken.issue(user=user, purpose=purpose, expires_at=timezone.now() + lifetime)
+
+
+def issue_email_verification(user):
+    now = timezone.now()
+    return OneTimeToken.issue_email_verification(
+        user=user,
+        link_expires_at=now + timedelta(hours=settings.EMAIL_VERIFICATION_HOURS),
+        code_expires_at=now + timedelta(minutes=settings.EMAIL_VERIFICATION_CODE_MINUTES),
+    )
+
+
+def _complete_email_verification(credential):
+    now = timezone.now()
+    credential.used_at = now
+    credential.save(update_fields=("used_at",))
+    user = credential.user
+    if not user.is_active:
+        user.is_active = True
+        user.save(update_fields=("is_active",))
+    return user
+
+
+@transaction.atomic
+def verify_email_link(raw_token):
+    credential = (
+        OneTimeToken.objects.select_for_update()
+        .select_related("user")
+        .filter(
+            purpose=OneTimeToken.Purpose.EMAIL_VERIFICATION,
+            digest=token_digest(raw_token),
+        )
+        .first()
+    )
+    if not credential or not credential.is_usable:
+        return None
+    return _complete_email_verification(credential)
+
+
+@transaction.atomic
+def verify_email_code(email, code):
+    user = User.objects.filter(email__iexact=normalize_email(email)).first()
+    credential = None
+    if user:
+        credential = (
+            OneTimeToken.objects.select_for_update()
+            .select_related("user")
+            .filter(
+                user=user,
+                purpose=OneTimeToken.Purpose.EMAIL_VERIFICATION,
+                used_at__isnull=True,
+            )
+            .first()
+        )
+
+    supplied_digest = verification_code_digest(user.pk if user else 0, code)
+    stored_digest = credential.code_digest if credential and credential.code_digest else "0" * 64
+    code_matches = hmac.compare_digest(stored_digest, supplied_digest)
+    now = timezone.now()
+    if (
+        not credential
+        or not credential.code_digest
+        or not credential.code_expires_at
+        or credential.code_expires_at <= now
+        or credential.code_failed_attempts >= EMAIL_VERIFICATION_CODE_MAX_ATTEMPTS
+    ):
+        return None
+    if not code_matches:
+        credential.code_failed_attempts += 1
+        update_fields = ["code_failed_attempts"]
+        if credential.code_failed_attempts >= EMAIL_VERIFICATION_CODE_MAX_ATTEMPTS:
+            credential.used_at = now
+            update_fields.append("used_at")
+        credential.save(update_fields=update_fields)
+        return None
+    return _complete_email_verification(credential)
 
 
 def issue_session_tokens(user, *, ip_address=None, user_agent=""):

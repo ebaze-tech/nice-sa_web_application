@@ -22,12 +22,15 @@ from rest_framework_simplejwt.tokens import AccessToken
 from audit.models import AuditLog
 
 from .admin import NicesaUserAdmin
+from .constants import EMAIL_VERIFICATION_CODE_MAX_ATTEMPTS
 from .forms import NicesaAdminPasswordChangeForm, NicesaUserCreationForm
 from .models import AuthSession, LoginAttempt, OneTimeToken, User
 from .permissions import HasNicesaPermission
 from .services import issue_session_tokens
 from .throttles import (
     ChangePasswordThrottle,
+    CodeVerificationAccountThrottle,
+    CodeVerificationIPThrottle,
     LoginThrottle,
     PasswordResetThrottle,
     RegistrationThrottle,
@@ -98,6 +101,18 @@ class AuthTestMixin:
         self.assertIsNotNone(match)
         return parse_qs(urlparse(match.group(0)).query)["token"][0]
 
+    def extract_email_code(self, index=-1):
+        match = re.search(
+            rf"(?m)^\s{{4}}(\d{{{settings.EMAIL_VERIFICATION_CODE_LENGTH}}})$",
+            mail.outbox[index].body,
+        )
+        self.assertIsNotNone(match)
+        return match.group(1)
+
+    def different_code(self, code):
+        replacement = "1" if code[0] != "1" else "2"
+        return replacement + code[1:]
+
     def post_with_commits(self, path, data, client=None, **headers):
         client = client or self.client
         with self.captureOnCommitCallbacks(execute=True):
@@ -116,6 +131,14 @@ class RegistrationAndVerificationTests(AuthTestMixin, APITestCase):
         self.assertEqual(user.role, User.Role.STUDENT)
         self.assertFalse(user.is_active)
         self.assertEqual(len(mail.outbox), 1)
+        code = self.extract_email_code()
+        token = self.extract_email_token()
+        self.assertEqual(len(code), settings.EMAIL_VERIFICATION_CODE_LENGTH)
+        self.assertLess(mail.outbox[0].body.index(code), mail.outbox[0].body.index(token))
+        self.assertIn(
+            f"{settings.EMAIL_VERIFICATION_CODE_LENGTH}-digit code",
+            mail.outbox[0].body,
+        )
         self.assertTrue(AuditLog.objects.filter(event=AuditLog.Event.REGISTRATION, subject=user).exists())
 
     def test_registration_requires_all_student_fields(self):
@@ -220,6 +243,112 @@ class RegistrationAndVerificationTests(AuthTestMixin, APITestCase):
         self.assertTrue(User.objects.get().is_active)
         self.assertTrue(AuditLog.objects.filter(event=AuditLog.Event.EMAIL_VERIFIED).exists())
 
+    def test_verification_code_activates_account_and_is_not_stored_plaintext(self):
+        self.post_with_commits("/api/v1/auth/register/", self.registration_payload())
+        code = self.extract_email_code()
+        credential = OneTimeToken.objects.get()
+
+        response = self.client.post(
+            "/api/v1/auth/verify-email/",
+            {"email": "ADA.OKAFOR@STU.UI.EDU.NG", "code": code},
+        )
+
+        self.assertEqual(response.status_code, 200, response.data)
+        self.assertTrue(User.objects.get().is_active)
+        self.assertNotEqual(credential.code_digest, code)
+        self.assertNotIn(code, str(credential.__dict__.values()))
+        audit = AuditLog.objects.get(event=AuditLog.Event.EMAIL_VERIFIED)
+        self.assertEqual(audit.metadata, {"method": "code"})
+
+    def test_verification_code_preserves_a_leading_zero(self):
+        generated = "0" + "7" * (settings.EMAIL_VERIFICATION_CODE_LENGTH - 1)
+        with mock.patch("accounts.models.generate_email_verification_code", return_value=generated):
+            self.post_with_commits("/api/v1/auth/register/", self.registration_payload())
+        code = self.extract_email_code()
+
+        response = self.client.post(
+            "/api/v1/auth/verify-email/",
+            {"email": "ada.okafor@stu.ui.edu.ng", "code": code},
+        )
+
+        self.assertTrue(code.startswith("0"))
+        self.assertEqual(response.status_code, 200, response.data)
+
+    def test_verification_code_must_be_sent_as_a_string(self):
+        response = self.client.post(
+            "/api/v1/auth/verify-email/",
+            {
+                "email": "ada.okafor@stu.ui.edu.ng",
+                "code": int("1" * settings.EMAIL_VERIFICATION_CODE_LENGTH),
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("code", response.data["error"]["fields"])
+
+    def test_wrong_code_is_generic_and_tracks_a_failed_attempt(self):
+        self.post_with_commits("/api/v1/auth/register/", self.registration_payload())
+        code = self.extract_email_code()
+
+        response = self.client.post(
+            "/api/v1/auth/verify-email/",
+            {"email": "ada.okafor@stu.ui.edu.ng", "code": self.different_code(code)},
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("invalid or expired", str(response.data))
+        self.assertEqual(OneTimeToken.objects.get().code_failed_attempts, 1)
+        failure = AuditLog.objects.get(event=AuditLog.Event.EMAIL_VERIFICATION_FAILED)
+        self.assertEqual(failure.metadata, {"method": "code"})
+        self.assertNotIn(code, str(failure.metadata))
+
+    def test_five_wrong_codes_invalidate_the_credential_pair(self):
+        self.post_with_commits("/api/v1/auth/register/", self.registration_payload())
+        code = self.extract_email_code()
+        token = self.extract_email_token()
+        wrong_code = self.different_code(code)
+
+        for _ in range(EMAIL_VERIFICATION_CODE_MAX_ATTEMPTS):
+            response = self.client.post(
+                "/api/v1/auth/verify-email/",
+                {"email": "ada.okafor@stu.ui.edu.ng", "code": wrong_code},
+            )
+            self.assertEqual(response.status_code, 400)
+
+        credential = OneTimeToken.objects.get()
+        self.assertEqual(
+            credential.code_failed_attempts,
+            EMAIL_VERIFICATION_CODE_MAX_ATTEMPTS,
+        )
+        self.assertIsNotNone(credential.used_at)
+        self.assertEqual(
+            self.client.post(
+                "/api/v1/auth/verify-email/",
+                {"email": "ada.okafor@stu.ui.edu.ng", "code": code},
+            ).status_code,
+            400,
+        )
+        self.assertEqual(
+            self.client.post("/api/v1/auth/verify-email/", {"token": token}).status_code,
+            400,
+        )
+
+    def test_expired_code_is_rejected_while_link_still_works(self):
+        self.post_with_commits("/api/v1/auth/register/", self.registration_payload())
+        code = self.extract_email_code()
+        token = self.extract_email_token()
+        OneTimeToken.objects.update(code_expires_at=timezone.now() - timedelta(seconds=1))
+
+        code_response = self.client.post(
+            "/api/v1/auth/verify-email/",
+            {"email": "ada.okafor@stu.ui.edu.ng", "code": code},
+        )
+        link_response = self.client.post("/api/v1/auth/verify-email/", {"token": token})
+
+        self.assertEqual(code_response.status_code, 400)
+        self.assertEqual(link_response.status_code, 200)
+
     def test_expired_verification_token_is_rejected(self):
         self.post_with_commits("/api/v1/auth/register/", self.registration_payload())
         token = self.extract_email_token()
@@ -230,14 +359,60 @@ class RegistrationAndVerificationTests(AuthTestMixin, APITestCase):
         self.assertEqual(response.status_code, 400)
         self.assertFalse(User.objects.get().is_active)
 
-    def test_resend_is_generic_and_invalidates_previous_link(self):
+    def test_using_code_invalidates_link_and_using_link_invalidates_code(self):
+        self.post_with_commits("/api/v1/auth/register/", self.registration_payload())
+        first_code = self.extract_email_code()
+        first_token = self.extract_email_token()
+
+        self.assertEqual(
+            self.client.post(
+                "/api/v1/auth/verify-email/",
+                {"email": "ada.okafor@stu.ui.edu.ng", "code": first_code},
+            ).status_code,
+            200,
+        )
+        self.assertEqual(
+            self.client.post("/api/v1/auth/verify-email/", {"token": first_token}).status_code,
+            400,
+        )
+
+        second_user = User.objects.create_user(
+            email="grace@stu.ui.edu.ng",
+            matric_number="CE/2024/002",
+            password=PASSWORD,
+            is_active=False,
+        )
+        _, second_token, second_code = OneTimeToken.issue_email_verification(
+            user=second_user,
+            link_expires_at=timezone.now() + timedelta(
+                hours=settings.EMAIL_VERIFICATION_HOURS
+            ),
+            code_expires_at=timezone.now() + timedelta(
+                minutes=settings.EMAIL_VERIFICATION_CODE_MINUTES
+            ),
+        )
+        self.assertEqual(
+            self.client.post("/api/v1/auth/verify-email/", {"token": second_token}).status_code,
+            200,
+        )
+        self.assertEqual(
+            self.client.post(
+                "/api/v1/auth/verify-email/",
+                {"email": second_user.email, "code": second_code},
+            ).status_code,
+            400,
+        )
+
+    def test_resend_is_generic_and_replaces_code_and_link(self):
         self.post_with_commits("/api/v1/auth/register/", self.registration_payload())
         old_token = self.extract_email_token()
+        old_code = self.extract_email_code()
         known = self.post_with_commits(
             "/api/v1/auth/resend-verification/",
             {"email": "ADA.OKAFOR@stu.ui.edu.ng"},
         )
         new_token = self.extract_email_token()
+        new_code = self.extract_email_code()
         unknown = self.client.post(
             "/api/v1/auth/resend-verification/",
             {"email": "unknown@stu.ui.edu.ng"},
@@ -245,14 +420,66 @@ class RegistrationAndVerificationTests(AuthTestMixin, APITestCase):
 
         self.assertEqual(known.data, unknown.data)
         self.assertNotEqual(old_token, new_token)
+        self.assertNotEqual(old_code, new_code)
         self.assertEqual(
             self.client.post("/api/v1/auth/verify-email/", {"token": old_token}).status_code,
             400,
         )
         self.assertEqual(
-            self.client.post("/api/v1/auth/verify-email/", {"token": new_token}).status_code,
+            self.client.post(
+                "/api/v1/auth/verify-email/",
+                {"email": "ada.okafor@stu.ui.edu.ng", "code": old_code},
+            ).status_code,
+            400,
+        )
+        self.assertEqual(
+            self.client.post(
+                "/api/v1/auth/verify-email/",
+                {"email": "ada.okafor@stu.ui.edu.ng", "code": new_code},
+            ).status_code,
             200,
         )
+
+    def test_code_verification_is_throttled_per_account_and_client_ip(self):
+        payload = {
+            "email": "missing@stu.ui.edu.ng",
+            "code": "0" * settings.EMAIL_VERIFICATION_CODE_LENGTH,
+        }
+        with (
+            mock.patch.object(
+                CodeVerificationAccountThrottle, "rate", "2/minute", create=True
+            ),
+            mock.patch.object(CodeVerificationIPThrottle, "rate", "100/minute", create=True),
+        ):
+            responses = [
+                self.client.post(
+                    "/api/v1/auth/verify-email/",
+                    payload,
+                    REMOTE_ADDR=f"192.0.2.{index}",
+                )
+                for index in range(1, 4)
+            ]
+        self.assertEqual([response.status_code for response in responses], [400, 400, 429])
+
+        cache.clear()
+        with (
+            mock.patch.object(
+                CodeVerificationAccountThrottle, "rate", "100/minute", create=True
+            ),
+            mock.patch.object(CodeVerificationIPThrottle, "rate", "2/minute", create=True),
+        ):
+            responses = [
+                self.client.post(
+                    "/api/v1/auth/verify-email/",
+                    {
+                        "email": f"missing{index}@stu.ui.edu.ng",
+                        "code": "0" * settings.EMAIL_VERIFICATION_CODE_LENGTH,
+                    },
+                    REMOTE_ADDR="198.51.100.10",
+                )
+                for index in range(1, 4)
+            ]
+        self.assertEqual([response.status_code for response in responses], [400, 400, 429])
 
 
 @override_settings(**TEST_SETTINGS)

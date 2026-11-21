@@ -6,6 +6,7 @@ class AuditLog(models.Model):
     class Event(models.TextChoices):
         REGISTRATION = "registration", "Registration"
         EMAIL_VERIFIED = "email_verified", "Email verified"
+        EMAIL_VERIFICATION_FAILED = "email_verification_failed", "Email verification failed"
         VERIFICATION_RESENT = "verification_resent", "Verification resent"
         LOGIN_SUCCEEDED = "login_succeeded", "Login succeeded"
         LOGIN_FAILED = "login_failed", "Login failed"

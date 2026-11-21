@@ -154,6 +154,12 @@ REST_FRAMEWORK = {
         "login": os.getenv("LOGIN_THROTTLE_RATE", "10/minute"),
         "registration": os.getenv("REGISTRATION_THROTTLE_RATE", "5/hour"),
         "resend_verification": os.getenv("RESEND_VERIFICATION_THROTTLE_RATE", "5/hour"),
+        "verify_code_account": os.getenv(
+            "EMAIL_VERIFICATION_CODE_ACCOUNT_THROTTLE_RATE", "10/minute"
+        ),
+        "verify_code_ip": os.getenv(
+            "EMAIL_VERIFICATION_CODE_IP_THROTTLE_RATE", "30/minute"
+        ),
         "password_reset": os.getenv("PASSWORD_RESET_THROTTLE_RATE", "5/hour"),
         "change_password": os.getenv("CHANGE_PASSWORD_THROTTLE_RATE", "10/hour"),
     },
@@ -189,6 +195,10 @@ else:
 
 DEFAULT_FROM_EMAIL = os.getenv("DEFAULT_FROM_EMAIL", "NICESA <no-reply@example.com>")
 EMAIL_VERIFICATION_HOURS = int(os.getenv("EMAIL_VERIFICATION_HOURS", "24"))
+EMAIL_VERIFICATION_CODE_MINUTES = int(os.getenv("EMAIL_VERIFICATION_CODE_MINUTES", "15"))
+EMAIL_VERIFICATION_CODE_LENGTH = int(os.getenv("EMAIL_VERIFICATION_CODE_LENGTH", "5"))
+if EMAIL_VERIFICATION_CODE_LENGTH < 1:
+    raise ImproperlyConfigured("EMAIL_VERIFICATION_CODE_LENGTH must be a positive integer.")
 PASSWORD_RESET_MINUTES = int(os.getenv("PASSWORD_RESET_MINUTES", "60"))
 LOGIN_MAX_FAILURES = int(os.getenv("LOGIN_MAX_FAILURES", "5"))
 LOGIN_LOCKOUT_MINUTES = int(os.getenv("LOGIN_LOCKOUT_MINUTES", "15"))

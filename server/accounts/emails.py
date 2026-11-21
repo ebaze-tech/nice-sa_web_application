@@ -9,14 +9,19 @@ def _url(base, raw_token):
     return f"{base}{separator}{urlencode({'token': raw_token})}"
 
 
-def send_verification_email(user, raw_token):
+def send_verification_email(user, raw_token, raw_code):
     send_mail(
         "Verify your NICESA account",
         (
-            f"Hello {user.first_name},\n\n"
-            "Verify your NICESA account using this link:\n"
+            f"Hello {user.first_name or 'there'},\n\n"
+            "Your NICESA email verification code is:\n\n"
+            f"    {raw_code}\n\n"
+            f"Enter this {settings.EMAIL_VERIFICATION_CODE_LENGTH}-digit code within "
+            f"{settings.EMAIL_VERIFICATION_CODE_MINUTES} minutes.\n\n"
+            "Alternatively, verify your account using this link:\n"
             f"{_url(settings.FRONTEND_VERIFY_URL, raw_token)}\n\n"
-            f"This link expires in {settings.EMAIL_VERIFICATION_HOURS} hours and can be used once."
+            f"The link expires in {settings.EMAIL_VERIFICATION_HOURS} hours. "
+            "The code and link can each be used once; using either one invalidates both."
         ),
         settings.DEFAULT_FROM_EMAIL,
         [user.email],

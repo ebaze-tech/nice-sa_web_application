@@ -1,3 +1,4 @@
+from django.conf import settings
 from django.contrib.auth import password_validation
 from django.contrib.auth.models import Permission
 from rest_framework import serializers
@@ -73,6 +74,64 @@ class EmailSerializer(serializers.Serializer):
 
 class TokenSerializer(serializers.Serializer):
     token = serializers.CharField(trim_whitespace=False)
+
+
+class VerificationCodeField(serializers.RegexField):
+    def __init__(self, **kwargs):
+        kwargs.setdefault(
+            "regex",
+            rf"^[0-9]{{{settings.EMAIL_VERIFICATION_CODE_LENGTH}}}$",
+        )
+        kwargs.setdefault("min_length", settings.EMAIL_VERIFICATION_CODE_LENGTH)
+        kwargs.setdefault("max_length", settings.EMAIL_VERIFICATION_CODE_LENGTH)
+        kwargs.setdefault("trim_whitespace", False)
+        kwargs.setdefault(
+            "help_text",
+            f"Exactly {settings.EMAIL_VERIFICATION_CODE_LENGTH} numeric digits. Send as a string so leading zeros are preserved.",
+        )
+        super().__init__(**kwargs)
+
+    def to_internal_value(self, data):
+        if not isinstance(data, str):
+            self.fail("invalid")
+        return super().to_internal_value(data)
+
+
+class VerifyEmailCodeSerializer(serializers.Serializer):
+    email = serializers.EmailField(help_text="Account email.")
+    code = VerificationCodeField()
+
+
+class VerifyEmailLinkSerializer(serializers.Serializer):
+    token = serializers.CharField(
+        trim_whitespace=False,
+        help_text="The single-use token from the verification link.",
+    )
+
+
+class VerifyEmailSerializer(serializers.Serializer):
+    token = serializers.CharField(
+        required=False,
+        trim_whitespace=False,
+        help_text="The single-use token from the verification link.",
+    )
+    email = serializers.EmailField(
+        required=False,
+        help_text="Account email. Required when verifying with a code.",
+    )
+    code = VerificationCodeField(required=False)
+
+    def validate_email(self, value):
+        return normalize_email(value)
+
+    def validate(self, attrs):
+        has_token = "token" in attrs
+        has_code_pair = "email" in attrs and "code" in attrs
+        if has_token == has_code_pair or ("email" in attrs) != ("code" in attrs):
+            raise serializers.ValidationError(
+                "Send exactly one verification method: token, or email and code."
+            )
+        return attrs
 
 
 class LoginSerializer(serializers.Serializer):

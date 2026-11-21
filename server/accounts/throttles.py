@@ -79,6 +79,25 @@ class ResendVerificationThrottle(ClientIPThrottle):
     scope = "resend_verification"
 
 
+class CodeVerificationAccountThrottle(IdentifierThrottle):
+    scope = "verify_code_account"
+    field_name = "email"
+
+    def get_cache_key(self, request, view):
+        if "code" not in request.data:
+            return None
+        return super().get_cache_key(request, view)
+
+
+class CodeVerificationIPThrottle(ClientIPThrottle):
+    scope = "verify_code_ip"
+
+    def get_cache_key(self, request, view):
+        if "code" not in request.data:
+            return None
+        return super().get_cache_key(request, view)
+
+
 class PasswordResetThrottle(ClientIPThrottle):
     scope = "password_reset"
 

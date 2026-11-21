@@ -11,7 +11,7 @@ from django.utils import timezone
 
 from .constants import OFFICER_PERMISSIONS
 from .managers import UserManager
-from .utils import normalize_email, normalize_matric_number, token_digest
+from .utils import normalize_email, normalize_matric_number, token_digest, verification_code_digest
 
 
 def validate_matric_number(value):
@@ -22,6 +22,13 @@ def validate_matric_number(value):
         raise ValidationError("Matric number cannot contain '@'.")
     if normalized and any(not char.isprintable() for char in normalized):
         raise ValidationError("Matric number contains unsupported characters.")
+
+
+def generate_email_verification_code():
+    return "".join(
+        secrets.choice("0123456789")
+        for _ in range(settings.EMAIL_VERIFICATION_CODE_LENGTH)
+    )
 
 
 class User(AbstractUser):
@@ -120,6 +127,9 @@ class OneTimeToken(models.Model):
     purpose = models.CharField(max_length=32, choices=Purpose.choices)
     digest = models.CharField(max_length=64, unique=True)
     expires_at = models.DateTimeField()
+    code_digest = models.CharField(max_length=64, null=True, blank=True)
+    code_expires_at = models.DateTimeField(null=True, blank=True)
+    code_failed_attempts = models.PositiveSmallIntegerField(default=0)
     created_at = models.DateTimeField(auto_now_add=True)
     used_at = models.DateTimeField(null=True, blank=True)
 
@@ -147,6 +157,34 @@ class OneTimeToken(models.Model):
             expires_at=expires_at,
         )
         return instance, raw_token
+
+    @classmethod
+    @transaction.atomic
+    def issue_email_verification(cls, *, user, link_expires_at, code_expires_at):
+        now = timezone.now()
+        user.__class__.objects.select_for_update().get(pk=user.pk)
+        active_credentials = cls.objects.filter(
+            user=user,
+            purpose=cls.Purpose.EMAIL_VERIFICATION,
+            used_at__isnull=True,
+        )
+        previous_code_digest = active_credentials.values_list("code_digest", flat=True).first()
+        active_credentials.update(used_at=now)
+        raw_token = secrets.token_urlsafe(32)
+        while True:
+            raw_code = generate_email_verification_code()
+            code_digest = verification_code_digest(user.pk, raw_code)
+            if code_digest != previous_code_digest:
+                break
+        instance = cls.objects.create(
+            user=user,
+            purpose=cls.Purpose.EMAIL_VERIFICATION,
+            digest=token_digest(raw_token),
+            expires_at=link_expires_at,
+            code_digest=code_digest,
+            code_expires_at=code_expires_at,
+        )
+        return instance, raw_token, raw_code
 
     @property
     def is_usable(self):
